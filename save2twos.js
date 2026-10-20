@@ -31,13 +31,22 @@ async function main() {
   const age = now - createdAt.getTime();
   const fresh = age >= 0 && age <= FRESH_DRAFT_MINUTES * 60000;
   const changed = state !== null && state.lastDeviceTimeZone !== deviceZone;
+  let reminder = state && state.oldDraftReminder;
+  if (reminder && (changed || reminder.deviceZone !== deviceZone
+    || now < Date.parse(reminder.selectedAt) || now >= Date.parse(reminder.expiresAt))) {
+    reminder = null;
+  }
   let creationZone = deviceZone;
-  if (!fresh) {
-    creationZone = selectCreationTimeZone(deviceZone, changed ? state.lastDeviceTimeZone : null);
-    if (creationZone === null) {
+  if (!fresh && reminder) {
+    creationZone = reminder.creationZone;
+  } else if (!fresh) {
+    const selection = selectCreationTimeZone(deviceZone, changed ? state.lastDeviceTimeZone : null);
+    if (selection === null) {
       context.cancel();
       return;
     }
+    creationZone = selection.creationZone;
+    reminder = selection.reminder;
   } else if (changed) {
     const prompt = Prompt.create();
     prompt.title = '设备时区已变化';
@@ -56,11 +65,13 @@ async function main() {
   // Persist the sending device's zone, never the source zone chosen for an old draft.
   // A local write failure after HTTP success must not invite a duplicate create.
   try {
-    if (!fileManager.writeJSON(TIME_ZONE_STATE_PATH, {
+    const nextState = {
       version: 1,
       lastDeviceTimeZone: deviceZone,
       lastSentAt: new Date(now).toISOString()
-    })) {
+    };
+    if (reminder) nextState.oldDraftReminder = reminder;
+    if (!fileManager.writeJSON(TIME_ZONE_STATE_PATH, nextState)) {
       throw new Error('state write failed');
     }
   } catch (_) {
@@ -84,10 +95,51 @@ function readTimeZoneState(fileManager) {
     if (!fileManager.exists(TIME_ZONE_STATE_PATH)) return null;
     const state = fileManager.readJSON(TIME_ZONE_STATE_PATH);
     if (!state || state.version !== 1) throw new Error('invalid state');
-    return { lastDeviceTimeZone: normalizeTimeZone(state.lastDeviceTimeZone) };
+    return {
+      lastDeviceTimeZone: normalizeTimeZone(state.lastDeviceTimeZone),
+      oldDraftReminder: readOldDraftReminder(state.oldDraftReminder)
+    };
   } catch (_) {
     throw new Error('无法读取本地时区状态，请检查 /save2twos-state.json，未发送');
   }
+}
+
+function readOldDraftReminder(value) {
+  // Older v1 state has no reminder. Invalid optional data restores prompting.
+  if (!value || typeof value.selectedAt !== 'string' || typeof value.expiresAt !== 'string') return null;
+  const selectedAt = Date.parse(value.selectedAt);
+  const expiresAt = Date.parse(value.expiresAt);
+  if (!Number.isFinite(selectedAt) || !Number.isFinite(expiresAt)
+    || expiresAt <= selectedAt || expiresAt - selectedAt > 7 * 24 * 3600000) return null;
+  try {
+    return {
+      creationZone: normalizeTimeZone(value.creationZone),
+      deviceZone: normalizeTimeZone(value.deviceZone),
+      selectedAt: new Date(selectedAt).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString()
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function nextLocalMidnight(now, zone) {
+  // Locate the next local date boundary, rather than adding 24 hours.
+  // This works for both 23-hour and 25-hour daylight-saving days.
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone, calendar: 'gregory', numberingSystem: 'latn',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  });
+  const dayAt = (time) => formatter.format(new Date(time));
+  const today = dayAt(now);
+  let low = now;
+  let high = now + 36 * 3600000;
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+    if (dayAt(middle) === today) low = middle;
+    else high = middle;
+  }
+  return high;
 }
 
 function selectCreationTimeZone(deviceZone, previousZone) {
@@ -95,6 +147,7 @@ function selectCreationTimeZone(deviceZone, previousZone) {
   prompt.title = '选择草稿创建时区';
   prompt.message = '这篇草稿已超过 ' + FRESH_DRAFT_MINUTES + ' 分钟，或创建时间在未来。'
     + '\n请选择创建时所在的时区。上海：中国；芝加哥：美国中部。'
+    + '\n可仅发送本条，或在一段时间内让旧稿沿用所选时区；设备时区变化会重新确认。'
     + '\n当前设备：' + deviceZone
     + (previousZone ? '\n上次发送设备：' + previousZone + '（已变化）' : '');
   const zones = [...new Set(['Asia/Shanghai', 'America/Chicago', deviceZone])];
@@ -104,6 +157,8 @@ function selectCreationTimeZone(deviceZone, previousZone) {
     placeholder: '例如 America/Los_Angeles'
   });
   prompt.addButton('按所选时区发送');
+  prompt.addButton('今天不再询问（午夜恢复）');
+  prompt.addButton('7 天内不再询问');
   if (!prompt.show()) return null;
   const choices = prompt.fieldValues.creationZone;
   if (!Array.isArray(choices) || choices.length !== 1) {
@@ -113,7 +168,23 @@ function selectCreationTimeZone(deviceZone, previousZone) {
   if (selected !== '其他时区' && !zones.includes(selected)) {
     throw new Error('请选择有效的创建时区，未发送');
   }
-  return normalizeTimeZone(selected === '其他时区' ? prompt.fieldValues.customZone : selected);
+  const creationZone = normalizeTimeZone(selected === '其他时区' ? prompt.fieldValues.customZone : selected);
+  const selectedAt = Date.now();
+  let expiresAt = null;
+  if (prompt.buttonPressed === '今天不再询问（午夜恢复）') {
+    expiresAt = nextLocalMidnight(selectedAt, deviceZone);
+  } else if (prompt.buttonPressed === '7 天内不再询问') {
+    expiresAt = selectedAt + 7 * 24 * 3600000;
+  }
+  return {
+    creationZone: creationZone,
+    reminder: expiresAt === null ? null : {
+      creationZone: creationZone,
+      deviceZone: deviceZone,
+      selectedAt: new Date(selectedAt).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString()
+    }
+  };
 }
 
 function creationDay(createdAt, zone) {

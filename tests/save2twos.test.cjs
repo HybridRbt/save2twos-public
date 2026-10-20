@@ -12,7 +12,7 @@ async function run({ content = '一条笔记', authorized = true, values = {}, r
   now = new Date('2026-10-19T03:30:00Z'), deviceZone = 'Asia/Shanghai', state = null,
   promptAccepted = true, selectedZone = 'Asia/Shanghai', customZone = '',
   saveOK = true, stateReadError = false, uuid = '12345678-1234-4321-9876-123456789abc',
-  draftTags = ['private'] } = {}) {
+  draftTags = ['private'], pressedButton = '按所选时区发送' } = {}) {
   const result = { requests: [], errors: [], failures: [], canceled: 0, completed: 0,
     logs: [], passwordFields: [], prompts: [], writes: [] };
   const credentials = { api_key: 'test-secret', ...values };
@@ -30,8 +30,8 @@ async function run({ content = '一条笔记', authorized = true, values = {}, r
     }) },
     Prompt: { create: () => {
       const prompt = {
-        fieldValues: {}, choices: [],
-        addButton() {},
+        fieldValues: {}, choices: [], buttons: [], buttonPressed: pressedButton,
+        addButton(name) { this.buttons.push(name); },
         addSelect(name, label, choices) {
           this.choices = choices;
           this.fieldValues[name] = selectedZone === null ? [] : [selectedZone];
@@ -367,3 +367,107 @@ for (const tags of [[], null]) {
     assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts']);
   });
 }
+
+const oldNow = new Date('2026-10-21T12:00:00Z');
+const reminderState = (overrides = {}) => ({
+  ...savedState('Asia/Shanghai'),
+  oldDraftReminder: {
+    creationZone: 'America/Chicago', deviceZone: 'Asia/Shanghai',
+    selectedAt: '2026-10-21T11:00:00.000Z', expiresAt: '2026-10-21T16:00:00.000Z',
+    ...overrides,
+  },
+});
+
+test('old draft prompt offers one-time send and both reminder durations', async () => {
+  const r = await run({ now: oldNow });
+  assert.deepEqual(r.prompts[0].buttons, ['按所选时区发送', '今天不再询问（午夜恢复）', '7 天内不再询问']);
+});
+
+test('today choice saves selected creation zone until device-local midnight', async () => {
+  const r = await run({ now: oldNow, selectedZone: 'America/Chicago',
+    pressedButton: '今天不再询问（午夜恢复）' });
+  const preference = r.writes[0].data.oldDraftReminder;
+  assert.equal(preference.creationZone, 'America/Chicago');
+  assert.equal(preference.deviceZone, 'Asia/Shanghai');
+  assert.equal(preference.expiresAt, '2026-10-21T16:00:00.000Z');
+});
+
+test('today expires at midnight in the device zone even on a 25-hour DST day', async () => {
+  const r = await run({ now: new Date('2026-11-01T00:30:00-05:00'),
+    deviceZone: 'America/Chicago', pressedButton: '今天不再询问（午夜恢复）' });
+  assert.equal(r.writes[0].data.oldDraftReminder.expiresAt, '2026-11-02T06:00:00.000Z');
+});
+
+test('today expires at midnight in the device zone on a 23-hour DST day', async () => {
+  const r = await run({ now: new Date('2026-03-08T00:30:00-06:00'),
+    deviceZone: 'America/Chicago', pressedButton: '今天不再询问（午夜恢复）' });
+  assert.equal(r.writes[0].data.oldDraftReminder.expiresAt, '2026-03-09T05:00:00.000Z');
+});
+
+test('seven-day choice lasts exactly 168 hours across DST', async () => {
+  const r = await run({ now: new Date('2026-10-30T12:00:00Z'), deviceZone: 'America/Chicago',
+    pressedButton: '7 天内不再询问' });
+  assert.equal(r.writes[0].data.oldDraftReminder.expiresAt, '2026-11-06T12:00:00.000Z');
+});
+
+test('active preference silently reuses chosen creation zone without extending expiration', async () => {
+  const r = await run({ now: oldNow, state: reminderState(),
+    createdAt: new Date('2026-10-19T00:30:00Z') });
+  assert.equal(r.prompts.length, 0);
+  assert.equal(r.requests[0].data.list, '2026-10-18');
+  assert.equal(r.requests[0].data.created, '2026-10-19T00:30:00.000Z');
+  assert.equal(r.writes[0].data.oldDraftReminder.expiresAt, '2026-10-21T16:00:00.000Z');
+});
+
+test('preference expires at its exact boundary', async () => {
+  const r = await run({ now: new Date('2026-10-21T16:00:00Z'), state: reminderState() });
+  assert.equal(r.prompts.length, 1);
+  assert.equal(r.writes[0].data.oldDraftReminder, undefined);
+});
+
+test('device zone change requires confirmation despite an active preference', async () => {
+  const r = await run({ now: oldNow, deviceZone: 'Europe/London', state: reminderState() });
+  assert.equal(r.prompts.length, 1);
+  assert.equal(r.writes[0].data.oldDraftReminder, undefined);
+});
+
+test('fresh records use current device zone and preserve an active old-draft preference', async () => {
+  const r = await run({ now: oldNow, createdAt: new Date('2026-10-21T11:55:00Z'),
+    state: reminderState() });
+  assert.equal(r.prompts.length, 0);
+  assert.equal(r.requests[0].data.list, '2026-10-21');
+  assert.equal(r.writes[0].data.oldDraftReminder.creationZone, 'America/Chicago');
+});
+
+test('fresh record sent after device change clears previous old-draft preference', async () => {
+  const r = await run({ now: oldNow, createdAt: new Date('2026-10-21T11:55:00Z'),
+    deviceZone: 'Europe/London', state: reminderState() });
+  assert.equal(r.prompts.length, 1);
+  assert.equal(r.writes[0].data.oldDraftReminder, undefined);
+});
+
+for (const opts of [{ promptAccepted: false }, { networkError: true },
+  { response: { statusCode: 401, success: false } }]) {
+  test(`cancel or failed send does not persist suppression: ${JSON.stringify(opts)}`, async () => {
+    const r = await run({ now: oldNow, pressedButton: '7 天内不再询问', ...opts });
+    assert.equal(r.writes.length, 0);
+  });
+}
+
+for (const overrides of [{ expiresAt: 'not-a-date' }, { creationZone: 'invalid-zone' },
+  { selectedAt: '2026-10-22T00:00:00Z' }]) {
+  test(`invalid or future-dated suppression falls back to asking: ${JSON.stringify(overrides)}`, async () => {
+    const r = await run({ now: oldNow, state: reminderState(overrides) });
+    assert.equal(r.prompts.length, 1);
+    assert.equal(r.requests.length, 1);
+    assert.deepEqual(r.failures, []);
+    assert.equal(r.writes[0].data.oldDraftReminder, undefined);
+  });
+}
+
+test('one-time send and old v1 state remain compatible', async () => {
+  const r = await run({ now: oldNow, state: savedState('Asia/Shanghai') });
+  assert.equal(r.prompts.length, 1);
+  assert.equal(r.writes[0].data.version, 1);
+  assert.equal(r.writes[0].data.oldDraftReminder, undefined);
+});
