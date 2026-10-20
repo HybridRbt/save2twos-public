@@ -13,11 +13,11 @@
 
 ## 当前版本
 
-每次发送时在正文末尾追加 ` #drafts`。如果正文已有用空白或文本边界隔开的 `#drafts`（不区分大小写），则不重复追加。不会修改 Drafts 原文或同步草稿自身的其他标签。
+每次发送时通过原生 `tags: ["drafts"]` 添加来源标签，正文原样发送，不再自动追加 `#drafts` 文字。用户自己写在正文中的 hashtag 会保留，不会修改 Drafts 原文或同步草稿自身的其他标签。
 
-示例：`买牛奶` → `买牛奶 #drafts`。
+示例：正文 `买牛奶` → Twos 正文仍为 `买牛奶`，同时拥有 `drafts` 标签。
 
-使用官方 `POST https://www.twosapp.com/api/v1/things`，以 JSON 发送，API key 放在 `Authorization: Bearer` 头中，不放入正文。除正文中的 `#drafts` 外，也通过官方 `tags: ["drafts"]` 字段明确指定来源标签。
+使用官方 `POST https://www.twosapp.com/api/v1/things`，以 JSON 发送，API key 放在 `Authorization: Bearer` 头中，不放入正文。标签只通过官方 `tags` 字段传递。
 
 取消凭据授权、API key 为空或正文为空白时停止发送；API key 使用密码输入框。HTTP 失败会提示状态码，网络异常给出固定提示，不记录完整响应或凭据，不自动重试创建请求。创建成功要求 HTTP 201。
 
@@ -77,8 +77,8 @@ if (fm.exists(file)) {
 
 运行 `node --check save2twos.js` 检查 JavaScript 语法，运行 `node --test` 执行回归测试（需要 Node.js 18+，无第三方依赖）。测试通过 VM 执行实际脚本，仅模拟 Drafts 专有 API 和网络边界。
 
-参见 [代码评审](docs/代码评审.md)。尚未在真实 Drafts Action 中执行，也未向 Twos 发送测试内容。
+参见 [代码评审](docs/代码评审.md)。用户实测已确认首次运行的 API key 提示、新稿判断、旧稿时区选择、日期页面及真实创建时间正确；发送成功/取消/失败时的本地状态更新规则尚未实机验证。
 
-41 项模拟测试覆盖新旧记录边界、首次与时区变化、取消、旧稿跨国补发、自定义时区、冬夏令时、状态读取/写入失败，以及标签和 v1 请求回归。尚未使用真实 API key 进行端到端测试。脚本不会创建失败后自动换一种参数再次发送，避免重复条目。
+41 项模拟测试覆盖新旧记录边界、首次与时区变化、取消、旧稿跨国补发、自定义时区、冬夏令时、状态读取/写入失败，以及正文保留、原生标签和 v1 请求回归。去除自动追加的 `#drafts` 文字已通过模拟验证，修复后的界面效果仍待实测；已有 Twos 条目不会自动修改。脚本不会创建失败后自动换一种参数再次发送，避免重复条目。
 
 官方参考：[Twos API](https://www.twosapp.com/developers)、[Twos 时区](https://twosapp.com/docs/customize/time-zones)、[Drafts 创建时间](https://scripting.getdrafts.com/classes/Draft#createdat)。

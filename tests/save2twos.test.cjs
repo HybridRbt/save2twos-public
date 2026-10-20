@@ -68,7 +68,7 @@ async function run({ content = '一条笔记', authorized = true, values = {}, r
 test('uses official v1 JSON request and Bearer key while preserving original draft', async () => {
   const r = await run({ content: '正文\n第二行  ' });
   assert.equal(r.requests.length, 1);
-  assert.equal(r.requests[0].data.text, '正文\n第二行   #drafts');
+  assert.equal(r.requests[0].data.text, '正文\n第二行  ');
   assert.equal(r.draft.content, '正文\n第二行  ');
   assert.deepEqual(r.draft.tags, ['private']);
   assert.equal(r.requests[0].data.token, undefined);
@@ -85,16 +85,18 @@ test('uses official v1 JSON request and Bearer key while preserving original dra
 });
 
 for (const content of ['#drafts', '正文 #drafts', '#DRAFTS\n正文']) {
-  test(`does not duplicate standalone source tag: ${JSON.stringify(content)}`, async () => {
+  test(`preserves user-written source hashtags: ${JSON.stringify(content)}`, async () => {
     const r = await run({ content });
     assert.equal(r.requests[0].data.text, content);
+    assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts']);
   });
 }
 
 for (const content of ['#draftsmanship', 'https://example.invalid/#drafts', '#drafts中文']) {
-  test(`does not mistake a substring for source tag: ${content}`, async () => {
+  test(`native source tag leaves other text untouched: ${content}`, async () => {
     const r = await run({ content });
-    assert.equal(r.requests[0].data.text, `${content} #drafts`);
+    assert.equal(r.requests[0].data.text, content);
+    assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts']);
   });
 }
 
@@ -158,7 +160,7 @@ test('fresh draft in unchanged zone sends without prompting and saves device zon
   assert.equal(r.prompts.length, 0);
   assert.equal(r.writes.length, 1);
   assert.equal(r.writes[0].data.lastDeviceTimeZone, 'Asia/Shanghai');
-  assert.equal(r.requests[0].data.text, '一条笔记 #drafts');
+  assert.equal(r.requests[0].data.text, '一条笔记');
 });
 
 test('first fresh send needs no prompt', async () => {
@@ -189,7 +191,7 @@ test('old Chinese draft sent from US uses selected Chinese day without updating 
   assert.equal(r.prompts.length, 1);
   assert.equal(r.requests[0].data.list, '2026-10-19');
   assert.equal(r.requests[0].data.created, '2026-10-18T16:23:00.000Z');
-  assert.equal(r.requests[0].data.text, '一条笔记 #drafts');
+  assert.equal(r.requests[0].data.text, '一条笔记');
   assert.deepEqual(Array.from(r.prompts[0].choices).slice(0, 2), ['Asia/Shanghai', 'America/Chicago']);
   assert.equal(r.writes[0].data.lastDeviceTimeZone, 'America/Chicago');
 });

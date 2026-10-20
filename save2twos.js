@@ -50,11 +50,8 @@ async function main() {
     }
   }
 
-  // Match a standalone tag, not a URL fragment or a longer tag name.
-  const content = /(^|\s)#drafts(?=\s|$)/i.test(draft.content)
-    ? draft.content
-    : draft.content + ' #drafts';
-  putMemo(cred, content, createdAt, creationZone);
+  // v1 supplies the source tag separately; preserve the user's text verbatim.
+  putMemo(cred, draft.content, createdAt, creationZone);
 
   // Persist the sending device's zone, never the source zone chosen for an old draft.
   // A local write failure after HTTP success must not invite a duplicate create.
