@@ -11,11 +11,12 @@ async function run({ content = '一条笔记', authorized = true, values = {}, r
   networkError = false, createdAt = new Date('2026-10-19T11:23:45+08:00'),
   now = new Date('2026-10-19T03:30:00Z'), deviceZone = 'Asia/Shanghai', state = null,
   promptAccepted = true, selectedZone = 'Asia/Shanghai', customZone = '',
-  saveOK = true, stateReadError = false, uuid = '12345678-1234-4321-9876-123456789abc' } = {}) {
+  saveOK = true, stateReadError = false, uuid = '12345678-1234-4321-9876-123456789abc',
+  draftTags = ['private'] } = {}) {
   const result = { requests: [], errors: [], failures: [], canceled: 0, completed: 0,
     logs: [], passwordFields: [], prompts: [], writes: [] };
   const credentials = { api_key: 'test-secret', ...values };
-  const draft = { content, tags: ['private'], createdAt, uuid };
+  const draft = { content, tags: draftTags, createdAt, uuid };
   const sandbox = {
     draft,
     Date: class extends Date { static now() { return now.getTime(); } },
@@ -73,7 +74,7 @@ test('uses official v1 JSON request and Bearer key while preserving original dra
   assert.deepEqual(r.draft.tags, ['private']);
   assert.equal(r.requests[0].data.token, undefined);
   assert.equal(r.requests[0].data.user_id, undefined);
-  assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts']);
+  assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts', 'private']);
   assert.equal(r.requests[0].data.created, '2026-10-19T03:23:45.000Z');
   assert.equal(r.requests[0].headers.Authorization, 'Bearer test-secret');
   assert.equal(r.requests[0].headers['Content-Type'], 'application/json');
@@ -88,7 +89,7 @@ for (const content of ['#drafts', '正文 #drafts', '#DRAFTS\n正文']) {
   test(`preserves user-written source hashtags: ${JSON.stringify(content)}`, async () => {
     const r = await run({ content });
     assert.equal(r.requests[0].data.text, content);
-    assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts']);
+    assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts', 'private']);
   });
 }
 
@@ -96,7 +97,7 @@ for (const content of ['#draftsmanship', 'https://example.invalid/#drafts', '#dr
   test(`native source tag leaves other text untouched: ${content}`, async () => {
     const r = await run({ content });
     assert.equal(r.requests[0].data.text, content);
-    assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts']);
+    assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts', 'private']);
   });
 }
 
@@ -169,57 +170,39 @@ test('first fresh send needs no prompt', async () => {
   assert.equal(r.writes.length, 1);
 });
 
-test('adds source metadata in attached note and keeps body and native tag intact', async () => {
+test('sends clean text and source tag without attached note or original link', async () => {
   const r = await run({ content: '正文\n第二行  ' });
   const data = r.requests[0].data;
   assert.equal(data.text, '正文\n第二行  ');
-  assert.deepEqual(Array.from(data.tags), ['drafts']);
-  assert.equal(data.note, '- 来源：Drafts\n- 创建时区：Asia/Shanghai\n'
-    + '- 当地创建时间：2026-10-19 11:23:45 UTC+08:00\n'
-    + '- Drafts UUID：12345678-1234-4321-9876-123456789abc');
-  assert.equal(data.url, 'drafts://open?uuid=12345678-1234-4321-9876-123456789abc');
-  assert.equal(r.draft.uuid, '12345678-1234-4321-9876-123456789abc');
+  assert.deepEqual(Array.from(data.tags), ['drafts', 'private']);
+  assert.equal(Object.hasOwn(data, 'note'), false);
+  assert.equal(Object.hasOwn(data, 'url'), false);
   assert.equal(r.draft.content, '正文\n第二行  ');
 });
 
-test('backlink encodes UUID as a single query value', async () => {
-  const r = await run({ uuid: 'draft/value?x=1&y=2' });
-  assert.equal(r.requests[0].data.url, 'drafts://open?uuid=draft%2Fvalue%3Fx%3D1%26y%3D2');
-});
-
 for (const uuid of [null, '', '   ']) {
-  test(`missing UUID stops before creating a broken backlink: ${JSON.stringify(uuid)}`, async () => {
+  test(`sending no longer requires a UUID: ${JSON.stringify(uuid)}`, async () => {
     const r = await run({ uuid });
-    assert.equal(r.requests.length, 0);
-    assert.equal(r.writes.length, 0);
-    assert.match(r.failures[0], /UUID/);
+    assert.equal(r.requests.length, 1);
+    assert.deepEqual(r.failures, []);
+    assert.equal(Object.hasOwn(r.requests[0].data, 'url'), false);
   });
 }
 
-test('old draft note preserves chosen Chinese time even when sending from US', async () => {
+test('chosen Chinese day and exact instant survive removing metadata', async () => {
   const r = await run({ createdAt: new Date('2026-10-19T00:23:45.123+08:00'),
     now: new Date('2026-10-21T12:00:00Z'), deviceZone: 'America/Chicago',
     selectedZone: 'Asia/Shanghai' });
   const data = r.requests[0].data;
-  assert.match(data.note, /创建时区：Asia\/Shanghai/);
-  assert.match(data.note, /2026-10-19 00:23:45 UTC\+08:00/);
   assert.equal(data.created, '2026-10-18T16:23:45.123Z');
   assert.equal(data.list, '2026-10-19');
+  assert.equal(Object.hasOwn(data, 'note'), false);
 });
 
-for (const [instant, local] of [['2026-07-19T05:30:00Z', '2026-07-19 00:30:00 UTC-05:00'],
-  ['2026-01-19T05:30:00Z', '2026-01-18 23:30:00 UTC-06:00']]) {
-  test(`note offset follows Chicago DST at creation: ${instant}`, async () => {
-    const r = await run({ createdAt: new Date(instant), now: new Date('2026-10-21T12:00:00Z'),
-      selectedZone: 'America/Chicago' });
-    assert.ok(r.requests[0].data.note.includes(local));
-  });
-}
-
-test('note supports fractional-hour timezone offsets', async () => {
-  const r = await run({ createdAt: new Date('2026-10-19T03:23:45Z'),
+test('fractional-hour creation zone still selects the correct day', async () => {
+  const r = await run({ createdAt: new Date('2026-10-18T18:30:00Z'),
     now: new Date('2026-10-21T12:00:00Z'), selectedZone: '其他时区', customZone: 'Asia/Kathmandu' });
-  assert.ok(r.requests[0].data.note.includes('2026-10-19 09:08:45 UTC+05:45'));
+  assert.equal(r.requests[0].data.list, '2026-10-19');
 });
 
 test('repeated sends still create independent things without updates or source-ID mapping', async () => {
@@ -360,5 +343,27 @@ for (const hour of [0, 23]) {
       deviceZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
     assert.equal(r.requests[0].data.list, '2026-10-19');
     assert.equal(r.requests[0].data.created, createdAt.toISOString());
+  });
+}
+
+
+test('syncs all native Drafts tags together with the fixed source tag', async () => {
+  const r = await run({ draftTags: ['work', 'travel'], content: '正文 #not-native' });
+  assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts', 'work', 'travel']);
+  assert.equal(r.requests[0].data.text, '正文 #not-native');
+  assert.deepEqual(r.draft.tags, ['work', 'travel']);
+});
+
+test('trims blanks and deduplicates tag names case-insensitively without mutating originals', async () => {
+  const tags = ['Drafts', 'work', 'WORK', ' travel ', '', '  ', '项目/设备'];
+  const r = await run({ draftTags: tags });
+  assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts', 'work', 'travel', '项目/设备']);
+  assert.deepEqual(r.draft.tags, ['Drafts', 'work', 'WORK', ' travel ', '', '  ', '项目/设备']);
+});
+
+for (const tags of [[], null]) {
+  test(`source tag survives absent native tags: ${JSON.stringify(tags)}`, async () => {
+    const r = await run({ draftTags: tags });
+    assert.deepEqual(Array.from(r.requests[0].data.tags), ['drafts']);
   });
 }
