@@ -11,11 +11,11 @@ async function run({ content = '一条笔记', authorized = true, values = {}, r
   networkError = false, createdAt = new Date('2026-10-19T11:23:45+08:00'),
   now = new Date('2026-10-19T03:30:00Z'), deviceZone = 'Asia/Shanghai', state = null,
   promptAccepted = true, selectedZone = 'Asia/Shanghai', customZone = '',
-  saveOK = true, stateReadError = false } = {}) {
+  saveOK = true, stateReadError = false, uuid = '12345678-1234-4321-9876-123456789abc' } = {}) {
   const result = { requests: [], errors: [], failures: [], canceled: 0, completed: 0,
     logs: [], passwordFields: [], prompts: [], writes: [] };
   const credentials = { api_key: 'test-secret', ...values };
-  const draft = { content, tags: ['private'], createdAt };
+  const draft = { content, tags: ['private'], createdAt, uuid };
   const sandbox = {
     draft,
     Date: class extends Date { static now() { return now.getTime(); } },
@@ -167,6 +167,70 @@ test('first fresh send needs no prompt', async () => {
   const r = await run();
   assert.equal(r.prompts.length, 0);
   assert.equal(r.writes.length, 1);
+});
+
+test('adds source metadata in attached note and keeps body and native tag intact', async () => {
+  const r = await run({ content: '正文\n第二行  ' });
+  const data = r.requests[0].data;
+  assert.equal(data.text, '正文\n第二行  ');
+  assert.deepEqual(Array.from(data.tags), ['drafts']);
+  assert.equal(data.note, '- 来源：Drafts\n- 创建时区：Asia/Shanghai\n'
+    + '- 当地创建时间：2026-10-19 11:23:45 UTC+08:00\n'
+    + '- Drafts UUID：12345678-1234-4321-9876-123456789abc');
+  assert.equal(data.url, 'drafts://open?uuid=12345678-1234-4321-9876-123456789abc');
+  assert.equal(r.draft.uuid, '12345678-1234-4321-9876-123456789abc');
+  assert.equal(r.draft.content, '正文\n第二行  ');
+});
+
+test('backlink encodes UUID as a single query value', async () => {
+  const r = await run({ uuid: 'draft/value?x=1&y=2' });
+  assert.equal(r.requests[0].data.url, 'drafts://open?uuid=draft%2Fvalue%3Fx%3D1%26y%3D2');
+});
+
+for (const uuid of [null, '', '   ']) {
+  test(`missing UUID stops before creating a broken backlink: ${JSON.stringify(uuid)}`, async () => {
+    const r = await run({ uuid });
+    assert.equal(r.requests.length, 0);
+    assert.equal(r.writes.length, 0);
+    assert.match(r.failures[0], /UUID/);
+  });
+}
+
+test('old draft note preserves chosen Chinese time even when sending from US', async () => {
+  const r = await run({ createdAt: new Date('2026-10-19T00:23:45.123+08:00'),
+    now: new Date('2026-10-21T12:00:00Z'), deviceZone: 'America/Chicago',
+    selectedZone: 'Asia/Shanghai' });
+  const data = r.requests[0].data;
+  assert.match(data.note, /创建时区：Asia\/Shanghai/);
+  assert.match(data.note, /2026-10-19 00:23:45 UTC\+08:00/);
+  assert.equal(data.created, '2026-10-18T16:23:45.123Z');
+  assert.equal(data.list, '2026-10-19');
+});
+
+for (const [instant, local] of [['2026-07-19T05:30:00Z', '2026-07-19 00:30:00 UTC-05:00'],
+  ['2026-01-19T05:30:00Z', '2026-01-18 23:30:00 UTC-06:00']]) {
+  test(`note offset follows Chicago DST at creation: ${instant}`, async () => {
+    const r = await run({ createdAt: new Date(instant), now: new Date('2026-10-21T12:00:00Z'),
+      selectedZone: 'America/Chicago' });
+    assert.ok(r.requests[0].data.note.includes(local));
+  });
+}
+
+test('note supports fractional-hour timezone offsets', async () => {
+  const r = await run({ createdAt: new Date('2026-10-19T03:23:45Z'),
+    now: new Date('2026-10-21T12:00:00Z'), selectedZone: '其他时区', customZone: 'Asia/Kathmandu' });
+  assert.ok(r.requests[0].data.note.includes('2026-10-19 09:08:45 UTC+05:45'));
+});
+
+test('repeated sends still create independent things without updates or source-ID mapping', async () => {
+  const r = await run();
+  const again = await run({ state: r.writes[0].data });
+  assert.equal(r.requests.length, 1);
+  assert.equal(again.requests.length, 1);
+  assert.equal(again.requests[0].method, 'POST');
+  assert.equal(again.requests[0].url, 'https://www.twosapp.com/api/v1/things');
+  assert.deepEqual(Object.keys(again.writes[0].data).sort(),
+    ['lastDeviceTimeZone', 'lastSentAt', 'version']);
 });
 
 test('fresh send after timezone change asks before updating', async () => {

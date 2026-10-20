@@ -23,6 +23,10 @@ async function main() {
   if (!createdAt || typeof createdAt.getTime !== 'function' || !Number.isFinite(createdAt.getTime())) {
     throw new Error('无法读取草稿创建时间，未发送');
   }
+  const uuid = draft.uuid;
+  if (typeof uuid !== 'string' || !uuid.trim()) {
+    throw new Error('无法读取草稿 UUID，未发送');
+  }
 
   const now = Date.now();
   const deviceZone = normalizeTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
@@ -51,7 +55,7 @@ async function main() {
   }
 
   // v1 supplies the source tag separately; preserve the user's text verbatim.
-  putMemo(cred, draft.content, createdAt, creationZone);
+  putMemo(cred, draft.content, createdAt, creationZone, uuid);
 
   // Persist the sending device's zone, never the source zone chosen for an old draft.
   // A local write failure after HTTP success must not invite a duplicate create.
@@ -116,23 +120,43 @@ function selectCreationTimeZone(deviceZone, previousZone) {
   return normalizeTimeZone(selected === '其他时区' ? prompt.fieldValues.customZone : selected);
 }
 
-function creationDay(createdAt, zone) {
+function creationMetadata(createdAt, zone) {
   // Interpret the original instant in the selected zone, including historical DST.
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: zone, calendar: 'gregory', numberingSystem: 'latn',
-    year: 'numeric', month: '2-digit', day: '2-digit'
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
   }).formatToParts(createdAt);
   const value = (name) => parts.find((part) => part.type === name).value;
-  return value('year') + '-' + value('month') + '-' + value('day');
+  const day = value('year') + '-' + value('month') + '-' + value('day');
+  // Reinterpret the selected zone's wall clock as UTC to derive its offset
+  // at creation, independent of the sending device's zone or today's DST.
+  const localAsUTC = new Date(0);
+  localAsUTC.setUTCFullYear(Number(value('year')), Number(value('month')) - 1, Number(value('day')));
+  localAsUTC.setUTCHours(Number(value('hour')), Number(value('minute')), Number(value('second')), 0);
+  const offsetMinutes = Math.round((localAsUTC.getTime() - createdAt.getTime()) / 60000);
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offset = (offsetMinutes >= 0 ? '+' : '-')
+    + String(Math.floor(absoluteOffset / 60)).padStart(2, '0') + ':'
+    + String(absoluteOffset % 60).padStart(2, '0');
+  return {
+    day: day,
+    localTime: day + ' ' + value('hour') + ':' + value('minute') + ':' + value('second')
+      + ' UTC' + offset
+  };
 }
 
-function putMemo(cred, content, createdAt, creationZone) {
+function putMemo(cred, content, createdAt, creationZone, uuid) {
   const http = HTTP.create();
+  const metadata = creationMetadata(createdAt, creationZone);
   const data = {
     text: content,
     tags: ['drafts'],
+    url: 'drafts://open?uuid=' + encodeURIComponent(uuid),
+    note: '- 来源：Drafts\n- 创建时区：' + creationZone
+      + '\n- 当地创建时间：' + metadata.localTime + '\n- Drafts UUID：' + uuid,
     created: createdAt.toISOString(),
-    list: creationDay(createdAt, creationZone)
+    list: metadata.day
   };
   let response;
   try {
