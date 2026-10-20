@@ -1,6 +1,9 @@
 // See online documentation for examples
 // https://docs.getdrafts.com/docs/actions/scripting
 
+const FRESH_DRAFT_MINUTES = 30;
+const TIME_ZONE_STATE_PATH = '/save2twos-state.json';
+
 async function main() {
   const cred = getCredential();
 
@@ -21,21 +24,118 @@ async function main() {
     throw new Error('无法读取草稿创建时间，未发送');
   }
 
+  const now = Date.now();
+  const deviceZone = normalizeTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const fileManager = FileManager.createLocal();
+  const state = readTimeZoneState(fileManager);
+  const age = now - createdAt.getTime();
+  const fresh = age >= 0 && age <= FRESH_DRAFT_MINUTES * 60000;
+  const changed = state !== null && state.lastDeviceTimeZone !== deviceZone;
+  let creationZone = deviceZone;
+  if (!fresh) {
+    creationZone = selectCreationTimeZone(deviceZone, changed ? state.lastDeviceTimeZone : null);
+    if (creationZone === null) {
+      context.cancel();
+      return;
+    }
+  } else if (changed) {
+    const prompt = Prompt.create();
+    prompt.title = '设备时区已变化';
+    prompt.message = '上次发送：' + state.lastDeviceTimeZone + '\n当前设备：' + deviceZone
+      + '\n这是一篇新记录。是否采用当前时区归档并发送？';
+    prompt.addButton('使用当前时区并发送');
+    if (!prompt.show()) {
+      context.cancel();
+      return;
+    }
+  }
+
   // Match a standalone tag, not a URL fragment or a longer tag name.
   const content = /(^|\s)#drafts(?=\s|$)/i.test(draft.content)
     ? draft.content
     : draft.content + ' #drafts';
-  putMemo(cred, content, createdAt);
+  putMemo(cred, content, createdAt, creationZone);
+
+  // Persist the sending device's zone, never the source zone chosen for an old draft.
+  // A local write failure after HTTP success must not invite a duplicate create.
+  try {
+    if (!fileManager.writeJSON(TIME_ZONE_STATE_PATH, {
+      version: 1,
+      lastDeviceTimeZone: deviceZone,
+      lastSentAt: new Date(now).toISOString()
+    })) {
+      throw new Error('state write failed');
+    }
+  } catch (_) {
+    app.displayErrorMessage('已发送到 Twos，但未能保存时区状态；请勿重复发送。下次可能再次询问时区。');
+  }
 }
 
-function putMemo(cred, content, createdAt) {
+function normalizeTimeZone(zone) {
+  if (typeof zone !== 'string' || !zone.trim()) {
+    throw new Error('请选择有效的创建时区，未发送');
+  }
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: zone.trim() }).resolvedOptions().timeZone;
+  } catch (_) {
+    throw new Error('时区无效，请填写 Asia/Shanghai 等时区名称，未发送');
+  }
+}
+
+function readTimeZoneState(fileManager) {
+  try {
+    if (!fileManager.exists(TIME_ZONE_STATE_PATH)) return null;
+    const state = fileManager.readJSON(TIME_ZONE_STATE_PATH);
+    if (!state || state.version !== 1) throw new Error('invalid state');
+    return { lastDeviceTimeZone: normalizeTimeZone(state.lastDeviceTimeZone) };
+  } catch (_) {
+    throw new Error('无法读取本地时区状态，请检查 /save2twos-state.json，未发送');
+  }
+}
+
+function selectCreationTimeZone(deviceZone, previousZone) {
+  const prompt = Prompt.create();
+  prompt.title = '选择草稿创建时区';
+  prompt.message = '这篇草稿已超过 ' + FRESH_DRAFT_MINUTES + ' 分钟，或创建时间在未来。'
+    + '\n请选择创建时所在的时区。上海：中国；芝加哥：美国中部。'
+    + '\n当前设备：' + deviceZone
+    + (previousZone ? '\n上次发送设备：' + previousZone + '（已变化）' : '');
+  const zones = [...new Set(['Asia/Shanghai', 'America/Chicago', deviceZone])];
+  prompt.addSelect('creationZone', '创建时区', zones.concat('其他时区'), [], false);
+  prompt.addTextField('customZone', '其他时区（选择“其他时区”时填写）', '', {
+    autocorrect: false,
+    placeholder: '例如 America/Los_Angeles'
+  });
+  prompt.addButton('按所选时区发送');
+  if (!prompt.show()) return null;
+  const choices = prompt.fieldValues.creationZone;
+  if (!Array.isArray(choices) || choices.length !== 1) {
+    throw new Error('请选择创建时区，未发送');
+  }
+  const selected = choices[0];
+  if (selected !== '其他时区' && !zones.includes(selected)) {
+    throw new Error('请选择有效的创建时区，未发送');
+  }
+  return normalizeTimeZone(selected === '其他时区' ? prompt.fieldValues.customZone : selected);
+}
+
+function creationDay(createdAt, zone) {
+  // Interpret the original instant in the selected zone, including historical DST.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone, calendar: 'gregory', numberingSystem: 'latn',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(createdAt);
+  const value = (name) => parts.find((part) => part.type === name).value;
+  return value('year') + '-' + value('month') + '-' + value('day');
+}
+
+function putMemo(cred, content, createdAt, creationZone) {
   const http = HTTP.create();
   const data = {
     text: content,
     tags: ['drafts'],
     created: createdAt.toISOString(),
-    list: createdAt.getFullYear() + '-' + String(createdAt.getMonth() + 1).padStart(2, '0')
-      + '-' + String(createdAt.getDate()).padStart(2, '0')
+    list: creationDay(createdAt, creationZone)
   };
   let response;
   try {

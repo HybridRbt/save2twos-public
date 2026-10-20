@@ -8,13 +8,38 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'save2twos.js'), 'utf8
 
 // Drafts APIs only exist in the app. Execute the actual action with boundary stubs.
 async function run({ content = '一条笔记', authorized = true, values = {}, response,
-  networkError = false, createdAt = new Date('2026-10-19T11:23:45+08:00') } = {}) {
+  networkError = false, createdAt = new Date('2026-10-19T11:23:45+08:00'),
+  now = new Date('2026-10-19T03:30:00Z'), deviceZone = 'Asia/Shanghai', state = null,
+  promptAccepted = true, selectedZone = 'Asia/Shanghai', customZone = '',
+  saveOK = true, stateReadError = false } = {}) {
   const result = { requests: [], errors: [], failures: [], canceled: 0, completed: 0,
-    logs: [], passwordFields: [] };
+    logs: [], passwordFields: [], prompts: [], writes: [] };
   const credentials = { api_key: 'test-secret', ...values };
   const draft = { content, tags: ['private'], createdAt };
   const sandbox = {
     draft,
+    Date: class extends Date { static now() { return now.getTime(); } },
+    Intl: { DateTimeFormat: function(locale, options) {
+      return new Intl.DateTimeFormat(locale, { timeZone: deviceZone, ...options });
+    } },
+    FileManager: { createLocal: () => ({
+      exists: () => state !== null,
+      readJSON() { if (stateReadError) throw new Error('unreadable'); return state; },
+      writeJSON(file, data) { result.writes.push({ file, data }); return saveOK; },
+    }) },
+    Prompt: { create: () => {
+      const prompt = {
+        fieldValues: {}, choices: [],
+        addButton() {},
+        addSelect(name, label, choices) {
+          this.choices = choices;
+          this.fieldValues[name] = selectedZone === null ? [] : [selectedZone];
+        },
+        addTextField(name) { this.fieldValues[name] = customZone; },
+        show() { result.prompts.push(this); return promptAccepted; },
+      };
+      return prompt;
+    } },
     Credential: { create: (identifier) => { result.credentialIdentifier = identifier; return ({
       addTextField() {},
       addPasswordField(key) { result.passwordFields.push(key); },
@@ -124,6 +149,132 @@ for (const createdAt of [null, 'not-a-date', new Date('invalid')]) {
   });
 }
 
+const savedState = (zone) => ({ version: 1, lastDeviceTimeZone: zone,
+  lastSentAt: '2026-10-18T00:00:00Z' });
+
+test('fresh draft in unchanged zone sends without prompting and saves device zone', async () => {
+  const r = await run({ state: savedState('Asia/Shanghai') });
+  assert.equal(r.requests.length, 1);
+  assert.equal(r.prompts.length, 0);
+  assert.equal(r.writes.length, 1);
+  assert.equal(r.writes[0].data.lastDeviceTimeZone, 'Asia/Shanghai');
+  assert.equal(r.requests[0].data.text, '一条笔记 #drafts');
+});
+
+test('first fresh send needs no prompt', async () => {
+  const r = await run();
+  assert.equal(r.prompts.length, 0);
+  assert.equal(r.writes.length, 1);
+});
+
+test('fresh send after timezone change asks before updating', async () => {
+  const r = await run({ state: savedState('America/Chicago') });
+  assert.equal(r.prompts.length, 1);
+  assert.match(r.prompts[0].message, /America\/Chicago/);
+  assert.match(r.prompts[0].message, /Asia\/Shanghai/);
+  assert.equal(r.writes[0].data.lastDeviceTimeZone, 'Asia/Shanghai');
+});
+
+test('canceling zone change sends nothing and leaves state untouched', async () => {
+  const r = await run({ state: savedState('America/Chicago'), promptAccepted: false });
+  assert.equal(r.requests.length, 0);
+  assert.equal(r.writes.length, 0);
+  assert.equal(r.canceled, 1);
+});
+
+test('old Chinese draft sent from US uses selected Chinese day without updating to Chinese device zone', async () => {
+  const r = await run({ createdAt: new Date('2026-10-19T00:23:00+08:00'),
+    now: new Date('2026-10-21T12:00:00Z'), deviceZone: 'America/Chicago',
+    state: savedState('America/Chicago'), selectedZone: 'Asia/Shanghai' });
+  assert.equal(r.prompts.length, 1);
+  assert.equal(r.requests[0].data.list, '2026-10-19');
+  assert.equal(r.requests[0].data.created, '2026-10-18T16:23:00.000Z');
+  assert.equal(r.requests[0].data.text, '一条笔记 #drafts');
+  assert.deepEqual(Array.from(r.prompts[0].choices).slice(0, 2), ['Asia/Shanghai', 'America/Chicago']);
+  assert.equal(r.writes[0].data.lastDeviceTimeZone, 'America/Chicago');
+});
+
+test('old draft and changed device zone use a single selection prompt', async () => {
+  const r = await run({ now: new Date('2026-10-21T12:00:00Z'),
+    state: savedState('America/Chicago') });
+  assert.equal(r.prompts.length, 1);
+  assert.equal(r.requests.length, 1);
+});
+
+test('old draft cancellation stops sending and saving', async () => {
+  const r = await run({ now: new Date('2026-10-21T12:00:00Z'), promptAccepted: false });
+  assert.equal(r.requests.length, 0);
+  assert.equal(r.writes.length, 0);
+  assert.equal(r.canceled, 1);
+});
+
+for (const [age, expectedPrompts] of [[30 * 60000, 0], [30 * 60000 + 1, 1], [-1, 1]]) {
+  test(`fresh/old boundary at age ${age}ms`, async () => {
+    const r = await run({ createdAt: new Date('2026-10-19T03:23:45Z'),
+      now: new Date(new Date('2026-10-19T03:23:45Z').getTime() + age) });
+    assert.equal(r.prompts.length, expectedPrompts);
+  });
+}
+
+test('old drafts require an explicit source zone', async () => {
+  const r = await run({ now: new Date('2026-10-21T12:00:00Z'), selectedZone: null });
+  assert.equal(r.requests.length, 0);
+  assert.match(r.failures[0], /时区/);
+});
+
+test('custom IANA zone controls day and appears after top candidates', async () => {
+  const r = await run({ createdAt: new Date('2026-10-19T00:30:00Z'),
+    now: new Date('2026-10-21T12:00:00Z'), deviceZone: 'Europe/London',
+    selectedZone: '其他时区', customZone: 'Pacific/Honolulu' });
+  assert.equal(r.requests[0].data.list, '2026-10-18');
+  assert.deepEqual(Array.from(r.prompts[0].choices),
+    ['Asia/Shanghai', 'America/Chicago', 'Europe/London', '其他时区']);
+});
+
+test('invalid custom zone stops sending', async () => {
+  const r = await run({ now: new Date('2026-10-21T12:00:00Z'),
+    selectedZone: '其他时区', customZone: 'not-a-zone' });
+  assert.equal(r.requests.length, 0);
+  assert.equal(r.writes.length, 0);
+  assert.match(r.failures[0], /时区/);
+});
+
+for (const [instant, expectedDay] of [['2026-07-19T05:30:00Z', '2026-07-19'],
+  ['2026-01-19T05:30:00Z', '2026-01-18']]) {
+  test(`Chicago uses creation date DST rules: ${instant}`, async () => {
+    const r = await run({ createdAt: new Date(instant), now: new Date('2026-10-21T12:00:00Z'),
+      selectedZone: 'America/Chicago' });
+    assert.equal(r.requests[0].data.list, expectedDay);
+    assert.equal(r.requests[0].data.created, instant.replace('Z', '.000Z'));
+  });
+}
+
+for (const opts of [{ networkError: true }, { response: { statusCode: 401, success: false } }]) {
+  test(`failed send does not update state: ${JSON.stringify(opts)}`, async () => {
+    const r = await run(opts);
+    assert.equal(r.writes.length, 0);
+  });
+}
+
+test('state write failure warns that creation succeeded without failing the action', async () => {
+  const r = await run({ saveOK: false });
+  assert.equal(r.requests.length, 1);
+  assert.deepEqual(r.failures, []);
+  assert.ok(r.errors.some((s) => /已发送/.test(s) && /重复发送/.test(s)));
+});
+
+test('unreadable state fails before sending', async () => {
+  const r = await run({ state: savedState('Asia/Shanghai'), stateReadError: true });
+  assert.equal(r.requests.length, 0);
+  assert.match(r.failures[0], /状态/);
+});
+
+test('invalid stored state fails before sending', async () => {
+  const r = await run({ state: { version: 99 } });
+  assert.equal(r.requests.length, 0);
+  assert.match(r.failures[0], /状态/);
+});
+
 test('non-throwing transport failure gives safe error', async () => {
   const r = await run({ response: { statusCode: 0, success: false, error: 'test-secret' } });
   assert.match(r.failures[0], /网络/);
@@ -139,7 +290,8 @@ test('other HTTP statuses are failures without fallback creates', async () => {
 for (const hour of [0, 23]) {
   test(`places the thing on the creation's local day near midnight: ${hour}:30`, async () => {
     const createdAt = new Date(2026, 9, 19, hour, 30, 0);
-    const r = await run({ createdAt });
+    const r = await run({ createdAt, now: new Date(createdAt.getTime() + 60000),
+      deviceZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
     assert.equal(r.requests[0].data.list, '2026-10-19');
     assert.equal(r.requests[0].data.created, createdAt.toISOString());
   });
