@@ -1,0 +1,19 @@
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+credentials*.json
+secrets*.json
+
+# Drafts runtime state and backups, if copied out of the app
+save2twos-state.json
+save2twos-state.backup-*.json
+
+# Private evidence, temporary work and tooling
+private/
+work/
+.superpowers/
+.worktrees/
+node_modules/
+*.log
+.DS_Store
