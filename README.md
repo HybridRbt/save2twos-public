@@ -2,14 +2,17 @@
 
 将 Drafts 当前草稿发送到 Twos 的 Action 脚本。
 
-## 使用
+## 安装与首次发送
 
-1. 在 Drafts 的 Action 中添加 Script 步骤，粘贴 `save2twos.js`。
+需要能够创建和运行 Script Action 的 Drafts，以及可创建 API key 的 Twos 账号。运行 Action 不需要 Node.js、服务器或本机项目目录；Node.js 仅用于开发测试。脚本界面为简体中文，依赖 Drafts 的 `Credential`、`HTTP`、`Prompt`、`FileManager` 和 `Intl` 时区支持。
+
+1. 打开仓库的 [save2twos.js](save2twos.js)，通过 **Raw** 复制完整源码。在 Drafts 创建一个 Action，添加 **Script** 步骤并粘贴源码。
 2. 此脚本使用异步入口，需启用该步骤的 **Allow asynchronous execution**。
 3. 在 Twos **Settings → API Keys** 创建具有 `write:things` 权限的 API key。
-4. 首次运行时在新的 `Post to Twos v1` 凭据窗口填写 API key。旧 `Post to Twos` 的 `api`、`user_id`、`token` 不再使用，不会自动替换或删除旧凭据。
+4. 新建一篇非空草稿，例如 `示例：整理书架`，添加原生标签 `示例`。
+5. 运行该 Action，在首次出现的 `Post to Twos v1` 凭据窗口填写 API key。确认 Twos 对应日期页面中出现原文、`drafts` 和 `示例` 标签。每次运行都会真实创建条目，首次检查只运行一次。旧 `Post to Twos` 的 `api`、`user_id`、`token` 不再使用，不会自动替换或删除旧凭据。
 
-凭据通过 Drafts Credential 保存，不要将真实 token 或私人接口地址写入仓库。
+凭据通过 Drafts Credential 保存，不写入脚本或本地时区状态。API key 只发送到 Twos 官方 HTTPS 接口。更换 key 时，在 Drafts 的凭据管理中更新或重置 `Post to Twos v1`，然后重新授权；在 Twos 撤销不再使用的 key。不要把真实 key、凭据导出或私人草稿提交到仓库。
 
 ## 当前版本
 
@@ -21,7 +24,7 @@
 
 ## 已关闭的附注与原稿链接
 
-用户实测来源附注和返回 Drafts 原稿的链接均可用，但 Twos 将附注及链接卡片展开，造成显示臃肿。结合 Drafts 主要作为快速发送器的用途，已关闭这两项功能：请求不再包含 `note` 或 `url`，不再依赖草稿 UUID。来源通过原生 `drafts` 标签表达，原始创建时间仍写入 API 字段。
+为保持记录紧凑，来源附注和返回 Drafts 原稿的链接均已关闭：请求不再包含 `note` 或 `url`，不再依赖草稿 UUID。来源通过原生 `drafts` 标签表达，原始创建时间仍写入 API 字段。
 
 决定与原因见 [设计决策](docs/设计决策.md)。重复发送仍创建新条目，不保存 UUID 到 Twos ID 的映射，不更新、不去重、不修改已有 Twos 条目。
 
@@ -33,7 +36,7 @@
 
 时间点与显示时区是两回事。例如 `2026-10-20 14:00 +08:00` 与 `2026-10-20 01:00 -05:00` 是同一时刻；传入 `created` 保留的是该时刻，不能强制 Twos 的界面保留中国时区。官方接口未提供条目原始时区的专用字段，Drafts 的 `createdAt` 也不携带创建地时区标识。
 
-用户已选择正文不添加固定时间文字，接受 Twos 原生创建时间可能随查看设备时区变化。所选时区用于确定归档日期，不改变真实创建时刻。
+正文不添加固定时间文字，Twos 原生创建时间可能随查看设备时区变化。所选时区用于确定归档日期，不改变真实创建时刻。
 
 ## 自动判断与时区选择
 
@@ -101,12 +104,32 @@ if (fm.exists(file)) {
 }
 ```
 
+## 故障处理与功能边界
+
+- 取消授权、正文为空或时区选择取消时不会发送。HTTP 401/403 时检查 key 是否有效及是否具有 `write:things` 权限。
+- 网络异常或未收到成功响应时，不会自动重试。远端可能已经创建条目，请先检查 Twos，再决定是否重发；重复发送会创建重复条目。
+- 提示“已发送到 Twos，但未能保存时区状态”时，内容已经创建，请勿重复发送。需要时按上节备份并重置本地状态。
+- 只发送当前草稿的文本和原生标签，不上传照片、不读取 GPS，不做双向同步、更新或去重。不会修改原草稿或追溯修改既有 Twos 条目。
+- 上海和芝加哥是内置快捷候选，不要求身处这两个地区；其他地区选择“其他时区”并填写 IANA 名称。示例日期、标签和状态均为虚构数据。
+
 ## 验证与审查
 
-运行 `node --check save2twos.js` 检查 JavaScript 语法，运行 `node --test` 执行回归测试（需要 Node.js 18+，无第三方依赖）。测试通过 VM 执行实际脚本，仅模拟 Drafts 专有 API 和网络边界。
+开发测试需要 Node.js 18+，不使用第三方依赖。在仓库根目录执行：
 
-参见 [代码评审](docs/代码评审.md)。用户实测已确认首次运行的 API key 提示、新稿判断、旧稿时区选择、日期页面及真实创建时间正确；发送成功/取消/失败时的本地状态更新规则尚未实机验证。
+```sh
+node --check save2twos.js
+node --test
+TZ=Asia/Shanghai node --test
+TZ=America/Chicago node --test
+git diff --check
+```
 
-用户已确认简洁显示及全量原生标签符合预期，Milestone 1 已验收。当前 69 项模拟测试进一步覆盖提醒暂停、到期边界、夏令时 23/25 小时日、固定 168 小时、设备时区变化和旧状态兼容；新增按钮及偏好保存尚待实机验证。已有 Twos 条目不自动修改。创建失败后不会自动换参数重发，避免重复条目。
+69 项测试通过 VM 执行实际脚本，模拟 Drafts 专有 API 和网络边界；覆盖日期跨日、毫秒、冬夏令时、标签、凭据、取消、失败和本地状态。测试不使用真实 API key，不会向 Twos 创建条目。
 
-官方参考：[Twos API](https://www.twosapp.com/developers)、[Twos 时区](https://twosapp.com/docs/customize/time-zones)、[Drafts 创建时间](https://scripting.getdrafts.com/classes/Draft#createdat)。
+基础发送、原生标签、创建时间和时区选择已有既往实机反馈。本次公开准备未重新执行 Drafts/Twos 端到端实测；状态异常分支、新增的旧稿提醒暂停按钮和偏好持久化仍仅有模拟测试证据，未声称适配全部设备或客户端版本。详见 [代码评审](docs/代码评审.md)。
+
+## 许可证
+
+本仓库脚本、测试和文档采用 [MIT License](LICENSE)。Drafts 和 Twos 是各自所有者的产品；本项目是独立的第三方集成。
+
+官方参考：[Twos API](https://www.twosapp.com/developers)、[Drafts 脚本](https://docs.getdrafts.com/docs/actions/scripting)、[Drafts 创建时间](https://scripting.getdrafts.com/classes/Draft#createdat)、[Drafts Credential](https://scripting.getdrafts.com/classes/Credential)。
