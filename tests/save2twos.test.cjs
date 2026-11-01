@@ -13,14 +13,21 @@ async function run({ content = '一条笔记', authorized = true, values = {}, r
   promptAccepted = true, selectedZone = 'Asia/Shanghai', customZone = '',
   saveOK = true, stateReadError = false, uuid = '12345678-1234-4321-9876-123456789abc',
   draftTags = ['private'], pressedButton = '按所选时区发送',
-  credentialFailure = '', httpCreateFailure = false } = {}) {
+  credentialFailure = '', httpCreateFailure = false, dateJS = false } = {}) {
   const result = { requests: [], errors: [], failures: [], canceled: 0, completed: 0,
     logs: [], passwordFields: [], prompts: [], writes: [] };
   const credentials = { api_key: 'test-secret', ...values };
   const draft = { content, tags: draftTags, createdAt, uuid };
   const sandbox = {
     draft,
-    Date: class extends Date { static now() { return now.getTime(); } },
+    Date: class extends Date {
+      static now() { return now.getTime(); }
+      // Drafts DateJS replaces the native millisecond result with Date/null.
+      static parse(value) {
+        const milliseconds = Date.parse(value);
+        return dateJS ? (Number.isNaN(milliseconds) ? null : new Date(milliseconds)) : milliseconds;
+      }
+    },
     Intl: { DateTimeFormat: function(locale, options) {
       return new Intl.DateTimeFormat(locale, { timeZone: deviceZone, ...options });
     } },
@@ -428,6 +435,45 @@ test('active preference silently reuses chosen creation zone without extending e
   assert.equal(r.requests[0].data.list, '2026-10-18');
   assert.equal(r.requests[0].data.created, '2026-10-19T00:30:00.000Z');
   assert.equal(r.writes[0].data.oldDraftReminder.expiresAt, '2026-10-21T16:00:00.000Z');
+});
+
+test('DateJS preserves the seven-day preference across sends without extending it', async () => {
+  const options = { dateJS: true, now: oldNow, selectedZone: 'America/Chicago',
+    createdAt: new Date('2026-10-19T00:30:00Z') };
+  const first = await run({ ...options, pressedButton: '7 天内不再询问' });
+  assert.equal(first.prompts.length, 1);
+  assert.equal(first.requests.length, 1);
+  assert.deepEqual(first.failures, []);
+  const second = await run({ ...options, now: new Date('2026-10-22T12:00:00Z'),
+    state: first.writes[0].data });
+  assert.equal(second.prompts.length, 0);
+  assert.equal(second.requests.length, 1);
+  assert.deepEqual(second.failures, []);
+  assert.equal(second.requests[0].data.list, '2026-10-18');
+  assert.equal(second.writes[0].data.oldDraftReminder.selectedAt, '2026-10-21T12:00:00.000Z');
+  assert.equal(second.writes[0].data.oldDraftReminder.expiresAt, '2026-10-28T12:00:00.000Z');
+});
+
+test('DateJS reuses the today preference and restores prompting at local midnight', async () => {
+  const options = { dateJS: true, now: oldNow, selectedZone: 'America/Chicago',
+    createdAt: new Date('2026-10-19T00:30:00Z') };
+  const first = await run({ ...options, pressedButton: '今天不再询问（午夜恢复）' });
+  assert.equal(first.prompts.length, 1);
+  assert.equal(first.requests.length, 1);
+  assert.deepEqual(first.failures, []);
+  const second = await run({ ...options, now: new Date('2026-10-21T15:59:59.999Z'),
+    state: first.writes[0].data });
+  assert.equal(second.prompts.length, 0);
+  assert.equal(second.requests.length, 1);
+  assert.deepEqual(second.failures, []);
+  assert.equal(second.requests[0].data.list, '2026-10-18');
+  assert.equal(second.writes[0].data.oldDraftReminder.expiresAt, '2026-10-21T16:00:00.000Z');
+  const midnight = await run({ ...options, now: new Date('2026-10-21T16:00:00Z'),
+    state: second.writes[0].data });
+  assert.equal(midnight.prompts.length, 1);
+  assert.equal(midnight.requests.length, 1);
+  assert.deepEqual(midnight.failures, []);
+  assert.equal(midnight.writes[0].data.oldDraftReminder, undefined);
 });
 
 test('preference expires at its exact boundary', async () => {
