@@ -35,7 +35,7 @@ function executeCapture() {
   const changed = state !== null && state.lastDeviceTimeZone !== deviceZone;
   let reminder = state && state.oldDraftReminder;
   if (reminder && (changed || reminder.deviceZone !== deviceZone
-    || now < Date.parse(reminder.selectedAt) || now >= Date.parse(reminder.expiresAt))) {
+    || now < new Date(reminder.selectedAt).getTime() || now >= new Date(reminder.expiresAt).getTime())) {
     reminder = null;
   }
   let creationZone = deviceZone;
@@ -113,8 +113,9 @@ function readTimeZoneState(fileManager) {
 function readOldDraftReminder(value) {
   // Older v1 state has no reminder. Invalid optional data restores prompting.
   if (!value || typeof value.selectedAt !== 'string' || typeof value.expiresAt !== 'string') return null;
-  const selectedAt = Date.parse(value.selectedAt);
-  const expiresAt = Date.parse(value.expiresAt);
+  // DateJS overrides Date.parse to return Date/null instead of milliseconds.
+  const selectedAt = new Date(value.selectedAt).getTime();
+  const expiresAt = new Date(value.expiresAt).getTime();
   if (!Number.isFinite(selectedAt) || !Number.isFinite(expiresAt)
     || expiresAt <= selectedAt || expiresAt - selectedAt > 7 * 24 * 3600000) return null;
   try {
